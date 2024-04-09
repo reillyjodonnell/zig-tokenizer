@@ -15,9 +15,46 @@ pub fn main() !void {
         try list.append(char);
     }
 
-    for (list.items) |item| {
-        print("{c}\n", .{item});
+    for (list.items, 0..) |item, index| {
+        const generated_token = try parseToken(list.items, item, index);
+        print("character: {c}", .{generated_token.type});
     }
-
-    // try fs.fileReader("src/index.html");
 }
+
+fn parseToken(items: []u8, item: u8, index: usize) !Token {
+    _ = items;
+    _ = index;
+
+    return Token{ .type = item };
+}
+
+const Token = struct {
+    type: u8,
+
+    pub fn init(huh: u8) Token {
+        return Token{ .type = huh };
+    }
+};
+
+const ForceQuirks = enum {
+    on,
+    off,
+};
+
+//DOCTYPE, start tag, end tag, comment, character, end-of-file
+const Doctype = struct {
+    name: []const u8,
+    public_identifier: u8,
+    systems_identifier: u8,
+    force_quirks: ForceQuirks,
+};
+
+const StartTag = struct {};
+
+const EndTag = struct {};
+
+const Comment = struct {};
+
+const Character = struct {};
+
+const EndOfFile = struct {};
