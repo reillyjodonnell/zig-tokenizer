@@ -53,6 +53,7 @@ const Token = struct {
 // COMMENTS
 const CommentError = error{
     SINGLE_LINE_COMMENT_NOT_CLOSED,
+    MULTI_LINE_COMMENT_INVALID_CHARACTER,
 };
 
 const State = enum {
@@ -201,6 +202,10 @@ const Tokenizer = struct {
                 }
             },
             '*' => {
+                // check if we're already in a multi line comment
+                if (self.context.active_type == ActiveType.MULTI_LINE_COMMENT) {
+                    return CommentError.MULTI_LINE_COMMENT_INVALID_CHARACTER;
+                }
                 const next_char = self.peek();
                 if (next_char == '/') {
                     // this is a multi line comment
@@ -211,6 +216,10 @@ const Tokenizer = struct {
                     return;
                 }
             },
+
+            // COMMON_TOKEN
+            //https://tc39.es/ecma262/#prod-CommonToken
+
             else => {},
         }
     }
