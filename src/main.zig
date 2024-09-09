@@ -17,11 +17,13 @@ pub fn main() !void {
     }
 }
 
-const State = enum { Start, Open, InStringLiteral, InNumericLiteral, InRegularExpressionLiteral, End };
+const State = enum { Start, Keyword, Identifier, Operator, InStringLiteral, InNumericLiteral, InRegularExpressionLiteral, End };
 
 const TokenType = enum {
     RESERVED_WORD,
     IDENTIFIER,
+    PUNCTUATOR,
+
     LINE_TERMINATOR,
     SINGLE_LINE_COMMENT,
     MULTI_LINE_COMMENT,
@@ -96,7 +98,6 @@ const Tokenizer = struct {
     context: Context,
 
     pub fn init(data: []const u8, allocator: std.mem.Allocator) !Tokenizer {
-        print("Data received: {s}\n", .{data});
         var reserved_words_map = std.StringHashMap(bool).init(allocator);
         for (reserved_words) |word| {
             try reserved_words_map.put(word, true);
@@ -130,8 +131,6 @@ const Tokenizer = struct {
         //https://unicode.org/Public/UCD/latest/ucd/PropList.txt
         while (!self.isEOF()) {
             const char = self.context.data[self.context.index];
-            print("index: {d}\n", .{self.context.index});
-            print("char: {c}\n", .{char});
             switch (self.goalSymbol) {
                 GoalSymbol.InputElementHashbangOrRegExp => {
                     try self.handleInputElementHashbangOrRegExp(char);
@@ -272,6 +271,9 @@ const Tokenizer = struct {
             return;
         }
         if (isCommonToken(char)) {
+            // add the token
+            try self.context.tokens.append(Token.init(TokenType.PUNCTUATOR, self.context.data[self.context.start_index .. self.context.index + 1]));
+            self.context.start_index = self.context.index + 1;
             return;
         }
         return;
@@ -288,24 +290,41 @@ const Tokenizer = struct {
     }
 
     pub fn processChar(self: *Tokenizer, char: u8) !void {
-        print("Processing char: {c}\n", .{char});
+        const ending_index: usize = if (self.context.index >= self.context.data.len) self.context.data.len else self.context.index + 1;
+        _ = char;
 
         // check if a ID_START unicode character
         // https://github.com/rust-lang/rust/pull/33098
         // https://www.unicode.org/Public/UNIDATA/DerivedCoreProperties.txt
 
-        // We might be at the end of the stream
-        if (self.context.index >= self.context.data.len and self.isKeyword(self.context.data[self.context.start_index..self.context.index])) {
-            print("Found reserved word: {s}\n", .{self.context.data[self.context.start_index..self.context.index]});
-            const token = Token.init(TokenType.RESERVED_WORD, self.context.data[self.context.start_index..self.context.index]);
-            try self.context.tokens.append(token);
-            return;
+        // check if contextual keyword
+        // await and yield;
+        // Those that are contextually disallowed as identifiers, in strict mode code: let, static, implements, interface, package, private, protected, and public;
+        if (std.mem.eql(u8, self.context.data[self.context.start_index..ending_index], "let")) {
+            // contextual keyword so we need to check the state
+            switch (self.state) {
+                State.Keyword => {
+                    // we are in a keyword state
+                    // so we need to check if we are in a strict mode
+                    try self.context.tokens.append(Token.init(TokenType.IDENTIFIER, self.context.data[self.context.start_index..ending_index]));
+                },
+                else => {
+                    try self.context.tokens.append(Token.init(TokenType.RESERVED_WORD, self.context.data[self.context.start_index..ending_index]));
+                },
+            }
         }
-        if (self.isKeyword(self.context.data[self.context.start_index .. self.context.index + 1])) {
-            print("Found reserved word: {s}\n", .{self.context.data[self.context.start_index .. self.context.index + 1]});
-            const token = Token.init(TokenType.RESERVED_WORD, self.context.data[self.context.start_index .. self.context.index + 1]);
+        // Those that are always allowed as identifiers, but also appear as keywords within certain syntactic productions, at places where Identifier is not allowed: as, async, from, get, meta, of, set, and target.
+
+        if (self.isKeyword(self.context.data[self.context.start_index..ending_index])) {
+            self.state = State.Keyword;
+            const token = Token.init(TokenType.RESERVED_WORD, self.context.data[self.context.start_index..ending_index]);
             try self.context.tokens.append(token);
             // If it's a white space next we need to skip it
+
+            if (ending_index >= self.context.data.len) {
+                return;
+            }
+
             self.context.start_index = self.context.index + 1;
             return;
         }
@@ -325,32 +344,37 @@ const Tokenizer = struct {
 };
 
 fn isCommonToken(char: u8) bool {
-    _ = char;
-    return true;
-    // switch (char) {
-    //     // IdentifierName
-    //     // IdentifierStart
-    //     // IdentifierStartChar
-    //     // \
-    //     // UnicodeEscapeSequence
-    //     // IdentifierName
-    //     // IdentifierPart
-    //     // IdentifierPartChar
-    //     // UnicodeIDContinue
-    //     // $
-    //     // \
-    //     // UnicodeEscapeSequence
-    //     // u Hex4Digits
-    //     // u{ CodePoint }
-    //     // PrivateIdentifier
-    //     // #
-    //     // IdentifierName
-    //     // Punctuator
-    //     // NumericLiteral
-    //     // StringLiteral
-    //     // Template
-    //     else => false,
-    // }
+    switch (char) {
+        // IdentifierName
+        // IdentifierStart
+        // IdentifierStartChar
+        // \
+        // UnicodeEscapeSequence
+        // IdentifierName
+        // IdentifierPart
+        // IdentifierPartChar
+        // UnicodeIDContinue
+        // $
+        // \
+        // UnicodeEscapeSequence
+        // u Hex4Digits
+        // u{ CodePoint }
+        // PrivateIdentifier
+        // #
+        // IdentifierName
+        // Punctuator
+        // Optional chaining (peek ahead) / lookahead not a decimal digit
+        // Other punctuators
+        // TODO peek ahead for next to see if it's triple equal, double equal, etc for all possible operators.
+        '{', '(', ')', '[', ']', ';', ',', '<', '>', '+', '-', '*', '%', '&', '|', '^', '!', '~', '?', '=' => {
+            return true;
+        },
+
+        // NumericLiteral
+        // StringLiteral
+        // Template
+        else => return false,
+    }
 }
 
 fn isLineTerminator(char: u16) bool {
@@ -385,7 +409,6 @@ test "Tokenizer" {
     const allocator = gpa.allocator();
     var tokenizer = try Tokenizer.init(data, allocator);
     const tokens = try tokenizer.tokenize();
-    print("Token length: {d}\n", .{tokens.items.len});
     defer tokenizer.deinit();
     try std.testing.expectEqualStrings("var", tokens.items[0].data);
 }
@@ -395,7 +418,6 @@ test "recognize reserved words" {
     const allocator = gpa.allocator();
     var tokenizer = try Tokenizer.init("const function var", allocator);
     const tokens = try tokenizer.tokenize();
-    print("Token length: {d}\n", .{tokens.items.len});
     defer tokenizer.deinit();
     // token should be a reserved word with the data "var"
     const first_token = tokens.items[0];
@@ -407,6 +429,31 @@ test "recognize reserved words" {
     const third_token = tokens.items[2];
     try std.testing.expectEqualStrings("var", third_token.data);
     try std.testing.expectEqual(TokenType.RESERVED_WORD, third_token.type);
+}
+
+test "tricky case with let" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    var tokenizer = try Tokenizer.init("var let = false", allocator);
+    const tokens = try tokenizer.tokenize();
+    print("Token length: {d}\n", .{tokens.items.len});
+    for (tokens.items) |token| {
+        print("Token: {s}\n", .{token.data});
+    }
+    defer tokenizer.deinit();
+    // token should be a reserved word with the data "var"
+    const first_token = tokens.items[0];
+    try std.testing.expectEqualStrings("var", first_token.data);
+    try std.testing.expectEqual(TokenType.RESERVED_WORD, first_token.type);
+    const second_token = tokens.items[1];
+    try std.testing.expectEqualStrings("let", second_token.data);
+    try std.testing.expectEqual(TokenType.IDENTIFIER, second_token.type);
+    const third_token = tokens.items[2];
+    try std.testing.expectEqualStrings("=", third_token.data);
+    try std.testing.expectEqual(TokenType.PUNCTUATOR, third_token.type);
+    const fourth_token = tokens.items[3];
+    try std.testing.expectEqualStrings("false", fourth_token.data);
+    try std.testing.expectEqual(TokenType.BOOLEAN, fourth_token.type);
 }
 
 // test "recognized single line comment" {
