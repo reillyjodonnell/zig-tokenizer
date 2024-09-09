@@ -130,6 +130,8 @@ const Tokenizer = struct {
         //https://unicode.org/Public/UCD/latest/ucd/PropList.txt
         while (!self.isEOF()) {
             const char = self.context.data[self.context.index];
+            print("index: {d}\n", .{self.context.index});
+            print("char: {c}\n", .{char});
             switch (self.goalSymbol) {
                 GoalSymbol.InputElementHashbangOrRegExp => {
                     try self.handleInputElementHashbangOrRegExp(char);
@@ -245,6 +247,9 @@ const Tokenizer = struct {
             //RegularExpressionLiteral
 
             else => {
+                if (isCommonToken(char)) {
+                    return;
+                }
                 // an error has occurred.
                 // TODO: handle this
             },
@@ -253,15 +258,17 @@ const Tokenizer = struct {
 
     fn handleInputElementDiv(self: *Tokenizer, char: u8) !void {
         if (isWhiteSpace(char)) {
-            self.advance();
+            // White space code points may occur between any two tokens and at the start or end of input.
+            // White space code points may occur within a StringLiteral, a RegularExpressionLiteral, a Template, or a TemplateSubstitutionTail
+            // where they are considered significant code points forming part of a literal value.
+            // They may also occur within a Comment, but cannot appear within any other kind of token.
+
             self.context.start_index = self.context.index + 1;
             return;
         }
         if (isLineTerminator(char)) {
-            self.advance();
             self.context.column = 0;
             self.context.line += 1;
-
             return;
         }
         if (isCommonToken(char)) {
@@ -272,6 +279,7 @@ const Tokenizer = struct {
 
     pub fn advance(self: *Tokenizer) void {
         self.context.index += 1;
+        self.context.column += 1;
     }
 
     pub fn handleComment(self: *Tokenizer, char: u8) void {
@@ -287,7 +295,12 @@ const Tokenizer = struct {
         // https://www.unicode.org/Public/UNIDATA/DerivedCoreProperties.txt
 
         // We might be at the end of the stream
-        print("What we have: {s}\n", .{self.context.data[self.context.start_index .. self.context.index + 1]});
+        if (self.context.index >= self.context.data.len and self.isKeyword(self.context.data[self.context.start_index..self.context.index])) {
+            print("Found reserved word: {s}\n", .{self.context.data[self.context.start_index..self.context.index]});
+            const token = Token.init(TokenType.RESERVED_WORD, self.context.data[self.context.start_index..self.context.index]);
+            try self.context.tokens.append(token);
+            return;
+        }
         if (self.isKeyword(self.context.data[self.context.start_index .. self.context.index + 1])) {
             print("Found reserved word: {s}\n", .{self.context.data[self.context.start_index .. self.context.index + 1]});
             const token = Token.init(TokenType.RESERVED_WORD, self.context.data[self.context.start_index .. self.context.index + 1]);
