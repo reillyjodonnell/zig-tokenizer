@@ -1,5 +1,4 @@
 const std = @import("std");
-const fs = @import("./file-reader.zig");
 const print = std.debug.print;
 
 //https://tc39.es/ecma262/#prod-UnicodeIDStart
@@ -18,7 +17,7 @@ pub fn main() !void {
     }
 }
 
-// TOKEN
+const State = enum { Start, Open, InStringLiteral, InNumericLiteral, InRegularExpressionLiteral, End };
 
 const TokenType = enum {
     RESERVED_WORD,
@@ -56,7 +55,7 @@ const CommentError = error{
     MULTI_LINE_COMMENT_INVALID_CHARACTER,
 };
 
-const State = enum {
+const GoalSymbol = enum {
     InputElementHashbangOrRegExp,
     InputElementDiv,
     InputElementRegExp,
@@ -69,6 +68,7 @@ const Context = struct {
     index: usize,
     start_index: usize,
     column: usize,
+    line: usize,
     tokens: std.ArrayList(Token),
     reserved_words_map: std.StringHashMap(bool),
     active_type: ActiveType,
@@ -91,7 +91,8 @@ const Possibilities = enum {
 };
 
 const Tokenizer = struct {
-    state: State,
+    state: State = .Start,
+    goalSymbol: GoalSymbol,
     context: Context,
 
     pub fn init(data: []const u8, allocator: std.mem.Allocator) !Tokenizer {
@@ -101,12 +102,13 @@ const Tokenizer = struct {
             try reserved_words_map.put(word, true);
         }
         return Tokenizer{
-            .state = State.InputElementHashbangOrRegExp,
+            .goalSymbol = GoalSymbol.InputElementHashbangOrRegExp,
             .context = Context{
                 .data = data,
                 .index = 0,
                 .start_index = 0,
                 .column = 0,
+                .line = 0,
                 .tokens = std.ArrayList(Token).init(allocator),
                 .reserved_words_map = reserved_words_map,
                 .active_type = ActiveType.NONE,
@@ -128,15 +130,16 @@ const Tokenizer = struct {
         //https://unicode.org/Public/UCD/latest/ucd/PropList.txt
         while (!self.isEOF()) {
             const char = self.context.data[self.context.index];
-            print("character is {c}\n", .{char});
-            switch (self.state) {
-                State.InputElementHashbangOrRegExp => {
+            switch (self.goalSymbol) {
+                GoalSymbol.InputElementHashbangOrRegExp => {
                     try self.handleInputElementHashbangOrRegExp(char);
                 },
-                State.InputElementDiv => {},
-                State.InputElementRegExp => {},
-                State.InputElementRegExpOrTemplateTail => {},
-                State.InputElementTemplateTail => {},
+                GoalSymbol.InputElementDiv => {
+                    try self.handleInputElementDiv(char);
+                },
+                GoalSymbol.InputElementRegExp => {},
+                GoalSymbol.InputElementRegExpOrTemplateTail => {},
+                GoalSymbol.InputElementTemplateTail => {},
             }
             try self.processChar(char);
             self.advance();
@@ -156,10 +159,20 @@ const Tokenizer = struct {
             0x000B,
             0x000C,
             0xFEFF,
-            // TODO: any code point in general category “Space_Separator”
+            // any code point in general category “Space_Separator”
+            0x0020,
+            0x00A0,
+            0x1680,
+            0x2000...0x200A,
+            0x202F,
+            0x205F,
+            0x3000,
             => {
-                self.state = State.InputElementDiv;
-                try self.context.tokens.append(Token.init(TokenType.WHITE_SPACE, self.context.data[self.context.index .. self.context.index + 1]));
+                // returning since whitespace is extraneous
+                self.goalSymbol = GoalSymbol.InputElementDiv;
+                // increment the start index
+                self.context.start_index = self.context.index + 1;
+                // try self.context.tokens.append(Token.init(TokenType.WHITE_SPACE, self.context.data[self.context.index .. self.context.index + 1]));
                 return;
             },
 
@@ -167,7 +180,8 @@ const Tokenizer = struct {
             // https://tc39.es/ecma262/#sec-line-terminators
             // https://tc39.es/ecma262/#table-line-terminator-code-points
             0x000A, 0x000D, 0x2028, 0x2029 => {
-                self.context.column += 1;
+                self.context.column = 0;
+                self.context.line += 1;
                 try self.context.tokens.append(Token.init(TokenType.LINE_TERMINATOR, self.context.data[self.context.index .. self.context.index + 1]));
                 if (self.context.active_type == ActiveType.SINGLE_LINE_COMMENT) {
                     self.context.active_type = ActiveType.NONE;
@@ -219,26 +233,66 @@ const Tokenizer = struct {
 
             // COMMON_TOKEN
             //https://tc39.es/ecma262/#prod-CommonToken
+            //    IdentifierName
+            //    PrivateIdentifier
+            //    Punctuator
+            //    NumericLiteral
+            //    StringLiteral
+            //    Template
 
-            else => {},
+            // HashbangComment
+
+            //RegularExpressionLiteral
+
+            else => {
+                // an error has occurred.
+                // TODO: handle this
+            },
         }
+    }
+
+    fn handleInputElementDiv(self: *Tokenizer, char: u8) !void {
+        if (isWhiteSpace(char)) {
+            self.advance();
+            self.context.start_index = self.context.index + 1;
+            return;
+        }
+        if (isLineTerminator(char)) {
+            self.advance();
+            self.context.column = 0;
+            self.context.line += 1;
+
+            return;
+        }
+        if (isCommonToken(char)) {
+            return;
+        }
+        return;
     }
 
     pub fn advance(self: *Tokenizer) void {
         self.context.index += 1;
     }
 
-    pub fn processChar(self: *Tokenizer, char: u8) !void {
+    pub fn handleComment(self: *Tokenizer, char: u8) void {
         _ = char;
+        _ = self;
+    }
+
+    pub fn processChar(self: *Tokenizer, char: u8) !void {
+        print("Processing char: {c}\n", .{char});
 
         // check if a ID_START unicode character
         // https://github.com/rust-lang/rust/pull/33098
         // https://www.unicode.org/Public/UNIDATA/DerivedCoreProperties.txt
 
-        // check if the word is a reserved word
+        // We might be at the end of the stream
+        print("What we have: {s}\n", .{self.context.data[self.context.start_index .. self.context.index + 1]});
         if (self.isKeyword(self.context.data[self.context.start_index .. self.context.index + 1])) {
+            print("Found reserved word: {s}\n", .{self.context.data[self.context.start_index .. self.context.index + 1]});
             const token = Token.init(TokenType.RESERVED_WORD, self.context.data[self.context.start_index .. self.context.index + 1]);
             try self.context.tokens.append(token);
+            // If it's a white space next we need to skip it
             self.context.start_index = self.context.index + 1;
             return;
         }
@@ -257,46 +311,103 @@ const Tokenizer = struct {
     }
 };
 
-// test "Tokenizer" {
-//     const data = "var";
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     const allocator = gpa.allocator();
-//     var tokenizer = try Tokenizer.init(data, allocator);
-//     const tokens = try tokenizer.tokenize();
-//     defer tokenizer.deinit();
-//     try std.testing.expectEqualStrings("var", tokens.items[0].data);
-// }
-
-// test "recognize reserved words" {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     const allocator = gpa.allocator();
-//     var tokenizer = try Tokenizer.init("const function var", allocator);
-//     const tokens = try tokenizer.tokenize();
-//     defer tokenizer.deinit();
-//     // token should be a reserved word with the data "var"
-//     const first_token = tokens.items[0];
-//     try std.testing.expectEqualStrings("const", first_token.data);
-//     try std.testing.expectEqual(TokenType.RESERVED_WORD, first_token.type);
-//     const second_token = tokens.items[1];
-//     try std.testing.expectEqualStrings("function", second_token.data);
-//     try std.testing.expectEqual(TokenType.RESERVED_WORD, second_token.type);
-//     const third_token = tokens.items[2];
-//     try std.testing.expectEqualStrings("var", third_token.data);
-//     try std.testing.expectEqual(TokenType.RESERVED_WORD, third_token.type);
-// }
-
-test "recognized single line comment" {
-    const test_allocator = std.testing.allocator;
-    var tokenizer = try Tokenizer.init("// this is a single line comment", test_allocator);
-    const tokens = try tokenizer.tokenize();
-    defer tokenizer.deinit();
-    try std.testing.expectEqualStrings("// this is a single line comment", tokens.items[0].data);
-    try std.testing.expectEqual(TokenType.SINGLE_LINE_COMMENT, tokens.items[0].type);
-    try std.testing.expectEqualStrings(" this is a single line comment", tokens.items[1].data);
-
-    try std.testing.expectEqual(TokenType.LINE_TERMINATOR, tokens.items[1].type);
-    try std.testing.expectEqualStrings("\n", tokens.items[1].data);
+fn isCommonToken(char: u8) bool {
+    _ = char;
+    return true;
+    // switch (char) {
+    //     // IdentifierName
+    //     // IdentifierStart
+    //     // IdentifierStartChar
+    //     // \
+    //     // UnicodeEscapeSequence
+    //     // IdentifierName
+    //     // IdentifierPart
+    //     // IdentifierPartChar
+    //     // UnicodeIDContinue
+    //     // $
+    //     // \
+    //     // UnicodeEscapeSequence
+    //     // u Hex4Digits
+    //     // u{ CodePoint }
+    //     // PrivateIdentifier
+    //     // #
+    //     // IdentifierName
+    //     // Punctuator
+    //     // NumericLiteral
+    //     // StringLiteral
+    //     // Template
+    //     else => false,
+    // }
 }
+
+fn isLineTerminator(char: u16) bool {
+    return switch (char) {
+        0x000A, 0x000D, 0x2028, 0x2029 => true,
+        else => false,
+    };
+}
+
+fn isWhiteSpace(char: u16) bool {
+    return switch (char) {
+        0x0009,
+        0x000B,
+        0x000C,
+        0xFEFF,
+        // any code point in general category “Space_Separator” (USP)
+        0x0020,
+        0x00A0,
+        0x1680,
+        0x2000...0x200A,
+        0x202F,
+        0x205F,
+        0x3000,
+        => true,
+        else => false,
+    };
+}
+
+test "Tokenizer" {
+    const data = "var";
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    var tokenizer = try Tokenizer.init(data, allocator);
+    const tokens = try tokenizer.tokenize();
+    print("Token length: {d}\n", .{tokens.items.len});
+    defer tokenizer.deinit();
+    try std.testing.expectEqualStrings("var", tokens.items[0].data);
+}
+
+test "recognize reserved words" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    var tokenizer = try Tokenizer.init("const function var", allocator);
+    const tokens = try tokenizer.tokenize();
+    print("Token length: {d}\n", .{tokens.items.len});
+    defer tokenizer.deinit();
+    // token should be a reserved word with the data "var"
+    const first_token = tokens.items[0];
+    try std.testing.expectEqualStrings("const", first_token.data);
+    try std.testing.expectEqual(TokenType.RESERVED_WORD, first_token.type);
+    const second_token = tokens.items[1];
+    try std.testing.expectEqualStrings("function", second_token.data);
+    try std.testing.expectEqual(TokenType.RESERVED_WORD, second_token.type);
+    const third_token = tokens.items[2];
+    try std.testing.expectEqualStrings("var", third_token.data);
+    try std.testing.expectEqual(TokenType.RESERVED_WORD, third_token.type);
+}
+
+// test "recognized single line comment" {
+//     const test_allocator = std.testing.allocator;
+//     var tokenizer = try Tokenizer.init("// this is a single line comment", test_allocator);
+//     const tokens = try tokenizer.tokenize();
+//     defer tokenizer.deinit();
+//     try std.testing.expectEqualStrings("// this is a single line comment", tokens.items[0].data);
+//     try std.testing.expectEqual(TokenType.SINGLE_LINE_COMMENT, tokens.items[0].type);
+//     try std.testing.expectEqualStrings(" this is a single line comment", tokens.items[1].data);
+
+//     try std.testing.expectEqual(TokenType.LINE_TERMINATOR, tokens.items[1].type);
+//     try std.testing.expectEqualStrings("\n", tokens.items[1].data);
+// }
 // list of reserved words
 const reserved_words = [_][]const u8{ "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield" };
 
